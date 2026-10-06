@@ -4,29 +4,11 @@ import html
 import json
 import streamlit as st
 
-# Cần file requirements.txt (cùng thư mục) chứa: streamlit và openai>=1.60
-try:
-    from openai import OpenAI
-except ImportError:
-    st.error(
-        "Thiếu thư viện `openai`. Hãy thêm file `requirements.txt` "
-        "(gồm 2 dòng: `streamlit` và `openai>=1.60`) vào GitHub rồi Reboot app."
-    )
-    st.stop()
+import requests  # có sẵn cùng Streamlit, không cần requirements.txt
 
 # ============================================================
 # NOVA AI — REAL AI + PRESENTATION
 # One-file Streamlit app
-#
-# Cài:
-#   pip install streamlit openai
-#
-# Chạy:
-#   streamlit run nova_ai.py
-#
-# API key:
-#   Cách 1: nhập ở thanh bên
-#   Cách 2: đặt biến môi trường OPENAI_API_KEY
 # ============================================================
 
 st.set_page_config(
@@ -267,9 +249,39 @@ with st.sidebar:
     st.caption("• Tạo bài thuyết trình 8 slide về Logistics")
 
 def get_client():
+    """Trả về API key (hoặc None nếu chưa nhập)."""
     if not api_key or not api_key.strip():
         return None
-    return OpenAI(api_key=api_key.strip())
+    return api_key.strip()
+
+def call_openai(key, messages):
+    """Gọi OpenAI Responses API trực tiếp bằng requests."""
+    r = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        json={"model": model, "input": messages},
+        timeout=120,
+    )
+    if r.status_code != 200:
+        try:
+            detail = r.json().get("error", {}).get("message", r.text)
+        except Exception:
+            detail = r.text
+        raise RuntimeError(f"HTTP {r.status_code}: {detail[:400]}")
+
+    data = r.json()
+    if data.get("output_text"):
+        return data["output_text"].strip()
+
+    parts = []
+    for item in data.get("output", []):
+        for c in item.get("content", []) or []:
+            if c.get("type") == "output_text":
+                parts.append(c.get("text", ""))
+    return "".join(parts).strip()
 
 def is_presentation_request(text):
     """
@@ -287,7 +299,6 @@ def is_presentation_request(text):
         "tạo slides",
         "làm slide",
         "làm slides",
-        "tạo powerpoint",
         "tạo powerpoint",
         "làm powerpoint",
         "presentation",
@@ -338,11 +349,7 @@ Quy tắc quan trọng:
     messages.append({"role": "user", "content": user_prompt})
 
     try:
-        response = client.responses.create(
-            model=model,
-            input=messages,
-        )
-        return response.output_text.strip()
+        return call_openai(client, messages)
     except Exception as e:
         return (
             "❌ Không gọi được AI.\n\n"
@@ -383,9 +390,9 @@ Không thêm text ngoài JSON.
 """
 
     try:
-        response = client.responses.create(
-            model=model,
-            input=[
+        raw = call_openai(
+            client,
+            [
                 {
                     "role": "developer",
                     "content": (
@@ -396,8 +403,6 @@ Không thêm text ngoài JSON.
                 {"role": "user", "content": presentation_instruction},
             ],
         )
-
-        raw = response.output_text.strip()
 
         # Loại bỏ markdown fence nếu model vô tình thêm vào.
         raw = re.sub(r"^```json\s*", "", raw, flags=re.I)
@@ -418,7 +423,6 @@ Không thêm text ngoài JSON.
         )
 
 def render_ai_message(message):
-    # Markdown renderer của Streamlit đẹp hơn HTML thủ công và an toàn hơn.
     st.markdown(message)
 
 # ============================================================
@@ -455,7 +459,7 @@ if not st.session_state.started:
 
 for role, message in st.session_state.messages:
     with st.chat_message(role):
-        st.markdown(message)  # không bật unsafe_allow_html nên an toàn
+        st.markdown(message)
 
 # ============================================================
 # PRESENTATION RESULT
@@ -469,118 +473,4 @@ if st.session_state.presentation:
         <div class="slide-card">
             <div class="slide-number">Presentation</div>
             <div class="slide-title">{html.escape(str(data.get("title", "Bài thuyết trình")))}</div>
-            <div class="slide-body">{html.escape(str(data.get("subtitle", "")))}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    for i, slide in enumerate(data.get("slides", []), start=1):
-        title = html.escape(str(slide.get("title", f"Slide {i}")))
-        bullets = slide.get("bullets", [])
-
-        bullet_html = "".join(
-            f"<li>{html.escape(str(item))}</li>"
-            for item in bullets
-        )
-
-        st.markdown(
-            f"""
-            <div class="slide-card">
-                <div class="slide-number">Slide {i}</div>
-                <div class="slide-title">{title}</div>
-                <div class="slide-body">
-                    <ul>{bullet_html}</ul>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-# ============================================================
-# INPUT
-# ============================================================
-
-prompt = st.chat_input(
-    "Hỏi một câu hỏi hoặc yêu cầu tạo bài trình bày..."
-)
-
-if prompt:
-    st.session_state.started = True
-    st.session_state.messages.append(("user", prompt))
-
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Chỉ kích hoạt presentation khi người dùng yêu cầu rõ ràng.
-    if is_presentation_request(prompt):
-        with st.spinner("✦ Nova AI đang tạo bài thuyết trình..."):
-            presentation, error = create_presentation(prompt)
-
-        if error:
-            st.session_state.messages.append(("assistant", error))
-        else:
-            st.session_state.presentation = presentation
-            st.session_state.messages.append(
-                (
-                    "assistant",
-                    "Đã tạo xong bài thuyết trình. Mình hiển thị các slide bên dưới."
-                )
-            )
-    else:
-        with st.spinner("✦ Nova AI đang suy nghĩ..."):
-            answer = ask_ai(prompt)
-
-        st.session_state.messages.append(("assistant", answer))
-
-    st.rerun()
-
-# ============================================================
-# FEATURES
-# ============================================================
-
-if not st.session_state.messages:
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.markdown("""
-        <div class="feature">
-            <div class="card-title">💬 Hỏi đáp</div>
-            <div class="card-desc">
-                Hỏi câu hỏi bình thường và nhận câu trả lời từ AI thật.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col2:
-        st.markdown("""
-        <div class="feature">
-            <div class="card-title">📊 Tạo trình bày</div>
-            <div class="card-desc">
-                Chỉ tạo slide khi bạn thực sự yêu cầu bài thuyết trình.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col3:
-        st.markdown("""
-        <div class="feature">
-            <div class="card-title">✨ Một AI duy nhất</div>
-            <div class="card-desc">
-                Một giao diện cho hỏi đáp và tạo nội dung trình bày.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-# ============================================================
-# RESET
-# ============================================================
-
-if st.session_state.messages:
-    if st.button("🗑️ Xóa cuộc trò chuyện"):
-        st.session_state.messages = []
-        st.session_state.started = False
-        st.session_state.presentation = None
-        st.rerun()
+            <div class="slide-body">{html.escape(str(data.get("subtitle", "")))}
